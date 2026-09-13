@@ -184,3 +184,68 @@ any future file shaped this way.
   BigQuery. BigQuery is used for staging/joining already-clean data, not
   for parsing raw exports - this was a deliberate shift after Phase 1's
   repeated ingestion failures.
+
+---
+
+## Phase 5: BigQuery staging - joining the three cleaned sources
+
+### Column name mismatch - "Country Code" with a space
+**In plain terms:** a column name in the database had a tiny spelling
+difference from what I typed in my code, a space instead of an
+underscore, so SQL couldn't find it until I matched it exactly.
+
+The staging join initially failed with:
+'Name Country_Code not found inside wb at [27:9]'
+
+World Bank's table schema uses "Country Code" and "Country Name" with a
+space (not an underscore), a side effect of how BigQuery's auto-detect
+read the column headers from the original CSV. SQL requires exact column
+names, so referencing 'wb.Country_Code' (underscore) failed to match
+the real column 'Country Code' (space).
+
+**Fix:** wrapped the column name in backticks to reference it exactly
+as it exists: '' wb.'Country Code' ''. A reminder that even after
+Python cleaning, the exact column names landing in BigQuery are worth
+checking against the Schema tab before writing SQL against them.
+Auto-detect can still introduce small naming quirks (spaces, casing)
+even on well-structured files.
+
+### Verifying a join actually worked, not just ran
+**In plain terms:** combining three data tables into one "ran without
+an error," but that's not the same as "worked correctly." I had to
+actually check the numbers to be sure it lined countries up right.
+
+After the join succeeded, previewing the result showed 'NULL' for
+'avg_annual_hours_worked', 'hdi_value', 'hdicode', and 'pop_total' on
+the first several rows (Afghanistan, Africa Eastern and Southern,
+etc.). At first glance this looked like the join had failed entirely.
+
+Investigated further with a spot-check: those specific countries
+genuinely aren't part of the OECD or don't appear the same way across
+all three sources, so 'NULL' there is correct, not a bug. Confirmed by
+querying two countries known to be in all three sources, Austria and
+USA, which showed complete data across every column for
+2017-2023, with expected 'NULL's only in 2024-2025 (OECD and UN HDI
+data doesn't extend that far yet).
+
+**Lesson:** a join "running successfully" and a join "working
+correctly" are different claims. Previewing the first alphabetical
+rows of a join result can be misleading if those happen to be
+non-matching entities. A targeted spot-check on known-good rows is a
+more reliable way to confirm a join, along with sanity-checking row
+counts before and after (2,385 rows in, 2,385 rows out; 337 rows with
+a real OECD match, in the expected range for a ~38-country
+organization).
+
+### Staging table design
+**In plain terms:** I combined the three cleaned datasets into one
+table, keeping every country from the base table even when the other
+two sources didn't have matching data for it.
+
+Built 'stg_us_eu_comparison' as a single 'LEFT JOIN' chain: World Bank
+as the base table, OECD and UN HDI attached wherever a country/year
+match exists. Chose 'LEFT JOIN' specifically (not 'INNER JOIN') to
+preserve every World Bank row even when a match is missing elsewhere,
+the same missing-values philosophy carried over from the Python
+cleaning phase: never silently drop a row because one source doesn't
+have data for it.
